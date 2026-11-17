@@ -446,7 +446,7 @@ select.field { appearance: none; -webkit-appearance: none; }
     dirty: false,
     saving: false,
     saveTimer: null,
-    dayStartHour: 0,
+    dayStartHour: 5,
     settings: null,
     status: null,
   };
@@ -474,7 +474,7 @@ select.field { appearance: none; -webkit-appearance: none; }
   async function api(path, opts = {}) {
     const r = await fetch(path, {
       ...opts,
-      headers: { "X-App-Key": KEY, "Content-Type": "application/json", ...(opts.headers || {}) },
+      headers: { ...(KEY ? { "X-App-Key": KEY } : {}), "Content-Type": "application/json", ...(opts.headers || {}) },
     });
     if (!r.ok) {
       let msg = r.status + "";
@@ -701,7 +701,7 @@ select.field { appearance: none; -webkit-appearance: none; }
     if (document.visibilityState === "hidden" && S.dirty && !CAPTURE) {
       fetch("/api/plan", {
         method: "POST", keepalive: true,
-        headers: { "X-App-Key": KEY, "Content-Type": "application/json" },
+        headers: { ...(KEY ? { "X-App-Key": KEY } : {}), "Content-Type": "application/json" },
         body: JSON.stringify(payload()),
       }).then((r) => { if (r.ok) { S.dirty = false; $("#saveBtn").classList.remove("dirty"); } }).catch(() => {});
     }

@@ -73,9 +73,9 @@ NAG_START = os.getenv("NAG_START", "08:00")
 NAG_END = os.getenv("NAG_END", "22:00")
 # 스케줄러가 몇 분 늦게 호출돼도 해당 알림 시각을 놓치지 않도록 허용하는 지연(분)
 NOTIFY_CATCHUP_MINUTES = int(os.getenv("NOTIFY_CATCHUP_MINUTES", "9"))
-# 플래너 하루의 시작 시각. 0 이면 자정 기준(요구사항 기본값), 5 로 두면 그리드(05~04시)와 동일하게
-# 새벽 0~4시는 '전날' 플래너로 취급한다.
-DAY_START_HOUR = int(os.getenv("DAY_START_HOUR", "0"))
+# 플래너 하루의 시작 시각. 기본 5 = 그리드(05~익일 04시)와 동일하게 새벽 0~4시는 '전날' 플래너로 취급.
+# 0 으로 두면 자정 기준.
+DAY_START_HOUR = int(os.getenv("DAY_START_HOUR", "5"))
 
 CAPTURE_WIDTH = 390
 CAPTURE_HEIGHT = 790
@@ -321,19 +321,32 @@ def key_ok(provided: str | None) -> bool:
     return bool(APP_SECRET_KEY) and bool(provided) and hmac.compare_digest(provided, APP_SECRET_KEY)
 
 
+KEY_COOKIE = "planner_key"
+
+
+def request_key(request: Request) -> str | None:
+    """헤더 → ?key= → 쿠키 순으로 키를 찾음"""
+    return (request.headers.get("x-app-key") or request.query_params.get("key")
+            or request.cookies.get(KEY_COOKIE))
+
+
 def require_key(request: Request) -> None:
-    provided = request.headers.get("x-app-key") or request.query_params.get("key")
-    if not key_ok(provided):
+    if not key_ok(request_key(request)):
         raise HTTPException(status_code=401, detail="invalid key")
 
 
+def set_key_cookie(resp: Response) -> Response:
+    resp.set_cookie(KEY_COOKIE, APP_SECRET_KEY, max_age=400 * 24 * 3600, httponly=True,
+                    secure=PUBLIC_BASE_URL.startswith("https"), samesite="lax", path="/")
+    return resp
+
+
 def app_url(d: str | None = None, with_key: bool = True) -> str:
-    params: dict[str, str] = {}
+    """카톡 메시지용 링크. 카톡을 거치면 쿼리스트링이 깨지는 경우가 있어 키·날짜를 경로에 넣는다
+    (/k/{key}/{date} → 쿠키 저장 후 /?date= 로 리다이렉트)."""
     if with_key:
-        params["key"] = APP_SECRET_KEY
-    if d:
-        params["date"] = d
-    return f"{PUBLIC_BASE_URL}/?{urlencode(params)}" if params else f"{PUBLIC_BASE_URL}/"
+        return f"{PUBLIC_BASE_URL}/k/{quote(APP_SECRET_KEY, safe='')}" + (f"/{d}" if d else "")
+    return f"{PUBLIC_BASE_URL}/?{urlencode({'date': d})}" if d else f"{PUBLIC_BASE_URL}/"
 
 
 def sign_state(ts: int) -> str:
@@ -811,16 +824,35 @@ _INDEX_HTML = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 _NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow"}
 
 
+def _forbidden() -> HTMLResponse:
+    return HTMLResponse(
+        "<!doctype html><meta name=viewport content='width=device-width'>"
+        "<body style='background:#121212;color:#888;font-family:sans-serif;display:grid;place-items:center;height:90vh'>"
+        "403 · 접근 권한이 없습니다</body>",
+        status_code=403, headers=_NO_STORE,
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
-async def index(key: str | None = Query(default=None)):
+async def index(request: Request):
+    if not key_ok(request_key(request)):
+        return _forbidden()
+    resp = HTMLResponse(_INDEX_HTML, headers=_NO_STORE)
+    if key_ok(request.query_params.get("key")):
+        set_key_cookie(resp)  # 이후 키 없는 주소로 열어도 이 브라우저에선 통과
+    return resp
+
+
+@app.get("/k/{key}")
+@app.get("/k/{key}/{d}")
+async def key_link(key: str, d: str | None = None):
+    """카톡 메시지 링크 진입점: 키를 쿠키로 저장하고 플래너로 이동"""
     if not key_ok(key):
-        return HTMLResponse(
-            "<!doctype html><meta name=viewport content='width=device-width'>"
-            "<body style='background:#121212;color:#888;font-family:sans-serif;display:grid;place-items:center;height:90vh'>"
-            "403 · 접근 권한이 없습니다</body>",
-            status_code=403, headers=_NO_STORE,
-        )
-    return HTMLResponse(_INDEX_HTML, headers=_NO_STORE)
+        return _forbidden()
+    target = "/"
+    if d and DATE_RE.match(d):
+        target = f"/?date={d}"
+    return set_key_cookie(RedirectResponse(target, status_code=303, headers=_NO_STORE))
 
 
 @app.get("/healthz")
@@ -897,8 +929,8 @@ async def preview_png(d: str | None = Query(default=None, alias="date")):
 
 
 @app.get("/kakao/login")
-async def kakao_login(key: str | None = Query(default=None)):
-    if not key_ok(key):
+async def kakao_login(request: Request):
+    if not key_ok(request_key(request)):
         raise HTTPException(401, "invalid key")
     if not KAKAO_REST_API_KEY:
         raise HTTPException(500, "KAKAO_REST_API_KEY 가 설정되지 않았습니다.")

@@ -205,8 +205,8 @@ gcloud run services logs read "$SERVICE" --region "$REGION" --limit 50
 - **`--max-instances 1` 필수**: 발송 기록(`state.json`) 경합을 막고, 메모리 캐시(`STORAGE_CACHE`)의 전제 조건이기도 합니다. 버킷 파일을 콘솔에서 직접 고쳤다면 재배포하거나 `STORAGE_CACHE=false`로 두세요.
 - **보안**:
   - 웹앱, API, 크론 모두 `APP_SECRET_KEY`로 보호됩니다. 페이지는 `Referrer-Policy: no-referrer`와 `noindex`를 적용합니다.
-  - 카톡 버튼 링크에는 바로 열 수 있도록 `?key=`가 들어갑니다. 원하지 않으면 `KAKAO_LINK_INCLUDE_KEY=false`로 바꿉니다.
+  - 카톡 버튼 링크는 `/k/{key}/{date}` 형태입니다. 열면 키를 브라우저 쿠키(HttpOnly)에 저장하고 플래너로 이동합니다. 카톡을 거치면 `?key=` 쿼리가 깨지는 경우가 있어서 이렇게 바꿨습니다. 원하지 않으면 `KAKAO_LINK_INCLUDE_KEY=false`.
   - ntfy 푸시에는 key를 넣지 않습니다.
-- **하루 기준**: 기본은 자정입니다. `DAY_START_HOUR=5`로 두면 그리드(05시~익일 04시)와 똑같이 새벽 0~4시를 전날 플래너로 취급합니다.
+- **하루 기준**: 기본 `DAY_START_HOUR=5`라서 그리드(05시~익일 04시)와 똑같이 새벽 0~4시는 전날 플래너로 취급합니다. 자정 기준을 원하면 `0`.
 - **Playwright 버전**: `:latest` 태그는 더 이상 배포되지 않으므로 이미지 태그와 `requirements.txt`의 `playwright==` 버전을 함께 올려야 합니다.
   - 이 이미지는 Ubuntu 24.04 기반이라 **Python 3.12**가 들어 있습니다. 코드는 3.11 이상이면 동작합니다.
