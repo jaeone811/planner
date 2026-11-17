@@ -9,8 +9,10 @@ planner/
 ├── static/
 │   ├── index.html       # 단일 파일 HTML/CSS/Vanilla JS 플래너 UI
 │   └── fonts/           # Pretendard (SIL OFL 1.1, OFL-LICENSE.txt 포함)
-├── Dockerfile           # mcr.microsoft.com/playwright/python:v1.65.2-noble, 포트 8080
+├── Dockerfile           # 기본: python:3.11-slim, 텍스트 브리핑 전용 (Chromium 없음), 포트 8080
+├── Dockerfile.capture   # 캡처 이미지 브리핑용: playwright/python:v1.65.2-noble
 ├── requirements.txt
+├── requirements-capture.txt
 ├── .env.example
 └── .dockerignore / .gitignore
 ```
@@ -149,7 +151,7 @@ EOF
 # ── 4) 배포 (Dockerfile 기반 소스 빌드) ───────────────────────────────
 gcloud run deploy "$SERVICE" --source . --region "$REGION" \
   --service-account "$SA" --allow-unauthenticated \
-  --memory 2Gi --cpu 2 --timeout 300 --concurrency 20 \
+  --memory 512Mi --cpu 1 --timeout 300 --concurrency 20 \
   --min-instances 0 --max-instances 1 \
   --env-vars-file env.yaml
 
@@ -192,7 +194,7 @@ gcloud run services logs read "$SERVICE" --region "$REGION" --limit 50
 | Cloud Run | 월 200만 요청, 18만 vCPU-초, 36만 GiB-초 (결제 계정 합산) | 크론 매분 = 월 약 4.3만 요청, 대부분 수 ms. 여유 있음 |
 | Cloud Scheduler | 결제 계정당 작업 3개 | 1개 |
 | Cloud Storage | 5GB, Class A 5천·B 5만 회/월. **미국 리전(us-central1·us-east1·us-west1)만 해당** | 메모리 캐시와 "바뀔 때만 저장" 덕분에 월 수백 회 수준 |
-| Artifact Registry | 0.5GB | Playwright 이미지가 이보다 커서 **월 0.1~0.2달러 정도 나올 수 있습니다** (7번 정리 정책으로 최소화) |
+| Artifact Registry | 0.5GB | 기본 이미지는 압축 후 수백 MB 이하라 대체로 한도 안 (7번 정리 정책으로 옛 이미지 삭제). 캡처용 이미지는 수 GB라 월 0.1~0.2달러 정도 |
 
 - 그래서 기본 리전을 `us-central1`로 잡았습니다. 앱 자체는 한국 시각(Asia/Seoul)으로 동작하고, 화면 저장 지연은 0.1~0.2초 정도 늘어납니다.
 - 서울(`asia-northeast3`)로 하면 버킷이 무료 한도 밖이라 월 몇 센트가 붙습니다.
@@ -203,12 +205,16 @@ gcloud run services logs read "$SERVICE" --region "$REGION" --limit 50
 - **스케줄 주기**: 브리핑 시각을 분 단위로 정확히 맞추려고 `* * * * *`(매분)으로 둡니다.
   - 요청 대부분은 수 ms 안에 끝나고, Cloud Scheduler 작업 1개는 무료 할당량(계정당 3개) 안에 들어갑니다.
   - 비용을 더 줄이려면 `*/5 * * * *`로 바꾸고 알림 시각을 5분 단위로 설정하세요. `NOTIFY_CATCHUP_MINUTES` 덕분에 지연돼도 놓치지 않습니다.
-- **메모리**: Chromium 캡처에 1GB 이상이 필요해서 `2Gi`로 잡았습니다.
+- **메모리**: 기본 이미지는 실사용 메모리가 수십 MB라 `512Mi`면 충분합니다.
 - **`--max-instances 1` 필수**: 발송 기록(`state.json`) 경합을 막고, 메모리 캐시(`STORAGE_CACHE`)의 전제 조건이기도 합니다. 버킷 파일을 콘솔에서 직접 고쳤다면 재배포하거나 `STORAGE_CACHE=false`로 두세요.
 - **보안**:
   - 웹앱, API, 크론 모두 `APP_SECRET_KEY`로 보호됩니다. 페이지는 `Referrer-Policy: no-referrer`와 `noindex`를 적용합니다.
   - 카톡 버튼 링크는 `/k/{key}/{date}` 형태입니다. 열면 키를 브라우저 쿠키(HttpOnly)에 저장하고 플래너로 이동합니다. 카톡을 거치면 `?key=` 쿼리가 깨지는 경우가 있어서 이렇게 바꿨습니다. 원하지 않으면 `KAKAO_LINK_INCLUDE_KEY=false`.
   - ntfy 푸시에는 key를 넣지 않습니다.
 - **하루 기준**: 기본 `DAY_START_HOUR=5`라서 그리드(05시~익일 04시)와 똑같이 새벽 0~4시는 전날 플래너로 취급합니다. 자정 기준을 원하면 `0`.
-- **Playwright 버전**: `:latest` 태그는 더 이상 배포되지 않으므로 이미지 태그와 `requirements.txt`의 `playwright==` 버전을 함께 올려야 합니다.
-  - 이 이미지는 Ubuntu 24.04 기반이라 **Python 3.12**가 들어 있습니다. 코드는 3.11 이상이면 동작합니다.
+- **캡처 이미지 브리핑으로 되돌리기**:
+  1. `cp Dockerfile.capture Dockerfile` 실행
+  2. env.yaml에 `BRIEF_MODE: "image"` 추가
+  3. `--memory 2Gi --cpu 2`로 재배포
+  - Playwright `:latest` 태그는 더 이상 배포되지 않으므로, 이미지 태그와 `requirements-capture.txt`의 `playwright==` 버전을 함께 올려야 합니다.
+  - 캡처 이미지는 Ubuntu 24.04 기반이라 Python 3.12가 들어 있습니다. 코드는 3.11 이상이면 동작합니다.

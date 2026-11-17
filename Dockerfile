@@ -1,6 +1,7 @@
-# Playwright 공식 Python 이미지 (Ubuntu 24.04 noble, Chromium·의존성 내장)
-# 주의: :latest 태그는 더 이상 배포되지 않으므로 버전을 고정한다. requirements.txt 의 playwright 버전과 일치해야 함.
-FROM mcr.microsoft.com/playwright/python:v1.65.2-noble
+# 기본 이미지: 텍스트 브리핑 전용 (Chromium 없음 → 이미지 수백 MB, 메모리 512Mi 로 충분)
+# 캡처 이미지 브리핑(BRIEF_MODE=image)이 필요하면 Dockerfile.capture 를 사용
+# Docker Hub 요청 제한을 피하려고 구글이 운영하는 Docker Hub 미러 사용 (python:3.11-slim 과 동일)
+FROM mirror.gcr.io/library/python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -19,5 +20,4 @@ COPY static ./static
 
 EXPOSE 8080
 
-# Cloud Run 이 주입하는 $PORT 사용. 크론 요청 처리 중 Playwright 가 같은 프로세스에 다시 접속하므로 단일 워커 + async 로 충분.
 CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --proxy-headers --forwarded-allow-ips='*'"]

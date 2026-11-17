@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import importlib.util
 import hashlib
 import hmac
 import io
@@ -92,6 +93,8 @@ STATUS_BATTERY_FIXED = int(os.getenv("STATUS_BATTERY_FIXED", "89"))  # real 모�
 # "none" 이면 원본 그대로 업로드
 # 브리핑 형식: text(기본) = 요약 텍스트만 / image = 플래너 캡처 이미지 포함
 BRIEF_MODE = os.getenv("BRIEF_MODE", "text").strip().lower()
+# 캡처 기능은 Playwright(Chromium)가 설치된 이미지에서만 동작 (Dockerfile.capture 참고)
+CAPTURE_AVAILABLE = importlib.util.find_spec("playwright") is not None
 KAKAO_IMAGE_RATIO = os.getenv("KAKAO_IMAGE_RATIO", "3:4").strip().lower()
 CHROMIUM_EXECUTABLE = os.getenv("CHROMIUM_EXECUTABLE", "").strip() or None  # 로컬 테스트용(선택)
 
@@ -747,14 +750,18 @@ async def send_brief(d: str, now: datetime) -> dict:
     BRIEF_MODE=text(기본): 요약 텍스트를 나에게 보내기(text 템플릿)
     BRIEF_MODE=image: 캡처 → 카카오 이미지 업로드 → 나에게 보내기(feed 템플릿)
     이후 ntfy 푸시"""
-    result: dict[str, Any] = {"type": "brief", "date": d, "mode": BRIEF_MODE}
+    mode = BRIEF_MODE
+    if mode == "image" and not CAPTURE_AVAILABLE:
+        log.warning("BRIEF_MODE=image 이지만 Playwright 가 없어 텍스트로 보냅니다 (Dockerfile.capture 사용 필요)")
+        mode = "text"
+    result: dict[str, Any] = {"type": "brief", "date": d, "mode": mode}
     hhmm = now.strftime("%H:%M")
     plan = await load_plan(d)
     st = plan_stats(plan)
     link_url = app_url(d, with_key=KAKAO_LINK_INCLUDE_KEY)
     link = {"web_url": link_url, "mobile_web_url": link_url}
 
-    if BRIEF_MODE == "image":
+    if mode == "image":
         per = " · ".join(f"{n} {fmt_hms(m)[:-3]}" for n, m in st["per_task"] if m > 0) or "시간 계획 없음"
         desc = f"총 {fmt_hm(st['total_minutes'])} | 할 일 {st['todo_done']}/{st['todo_total']} 완료\n{per}"
         png = await build_brief_image(d, now)
@@ -763,7 +770,7 @@ async def send_brief(d: str, now: datetime) -> dict:
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            if BRIEF_MODE == "image":
+            if mode == "image":
                 kakao_png = await asyncio.to_thread(fit_to_ratio, png)
                 kw, kh = Image.open(io.BytesIO(kakao_png)).size
                 info = await kakao_upload_image(client, kakao_png)
@@ -954,6 +961,7 @@ async def status():
         "ntfy": {"configured": bool(NTFY_TOPIC), "server": NTFY_SERVER},
         "nag_window": [NAG_START, NAG_END],
         "brief_mode": BRIEF_MODE,
+        "capture_available": CAPTURE_AVAILABLE,
         "last_cron_at": _last_cron_at,
     }
 
@@ -978,6 +986,8 @@ async def notify_test(kind: Literal["brief", "nag"] = Body("brief", embed=True),
 
 @app.get("/api/preview.png", dependencies=[Depends(require_key)])
 async def preview_png(d: str | None = Query(default=None, alias="date")):
+    if not CAPTURE_AVAILABLE:
+        raise HTTPException(501, "캡처 기능이 없는 서버입니다 (Dockerfile.capture 로 배포하면 사용 가능)")
     now = now_kst()
     target = validate_date(d) if d else planner_today(now)
     png = await build_brief_image(target, now)

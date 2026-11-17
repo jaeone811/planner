@@ -947,7 +947,8 @@ select.field { appearance: none; -webkit-appearance: none; }
     line("푸시(ntfy)", s.ntfy.configured, s.ntfy.configured ? "설정됨" : "NTFY_TOPIC 미설정");
     line("저장소", true, s.storage === "gcs" ? "Google Cloud Storage" : "로컬 파일");
     line("마지막 크론", !!s.last_cron_at, s.last_cron_at ? s.last_cron_at.replace("T", " ").slice(0, 16) : "아직 없음");
-    if (s.brief_mode === "image") $("#briefHint").textContent = "지정 시각에 오늘 플래너를 캡처해서 카톡 '나와의 채팅'으로 보내고, 아이폰 잠금화면 푸시(ntfy)도 함께 보냅니다.";
+    $("#previewImg").hidden = !s.capture_available;
+    if (s.brief_mode === "image" && s.capture_available) $("#briefHint").textContent = "지정 시각에 오늘 플래너를 캡처해서 카톡 '나와의 채팅'으로 보내고, 아이폰 잠금화면 푸시(ntfy)도 함께 보냅니다.";
     $("#nagHint").textContent = `${s.nag_window[0]} ~ ${s.nag_window[1]} 사이, 그날 플래너가 비어 있을 때만 발송됩니다.`;
     $("#kakaoLogin").href = "/kakao/login?key=" + encodeURIComponent(KEY);
   }

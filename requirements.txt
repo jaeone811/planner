@@ -1,5 +1,3 @@
-# Playwright 버전은 Dockerfile 베이스 이미지 태그(v1.65.2-noble)와 반드시 일치시킬 것
-playwright==1.65.2
 fastapi==0.163.1
 uvicorn[standard]==0.54.0
 httpx==0.28.1
