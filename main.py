@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import time
 from contextlib import asynccontextmanager
@@ -78,6 +79,11 @@ CAPTURE_SCALE = 2
 STATUS_BAR_HEIGHT_PX = 104  # 2x 기준 (CSS 52px)
 STATUS_BAR_BG = (0x12, 0x12, 0x12)
 STATUS_FONT_PATH = os.getenv("STATUS_FONT_PATH", str(STATIC_DIR / "fonts" / "Pretendard-SemiBold.otf"))
+# 캡처 상태바의 시각·배터리: random(기본) = 캡처마다 랜덤 / real = 실제 발송 시각 + 고정 배터리
+STATUS_TIME_MODE = os.getenv("STATUS_TIME_MODE", "random").lower()
+STATUS_TIME_RANGE = os.getenv("STATUS_TIME_RANGE", "00:00-23:59")  # 랜덤 시각 범위 (HH:MM-HH:MM)
+STATUS_BATTERY_RANGE = os.getenv("STATUS_BATTERY_RANGE", "20-100")  # 랜덤 배터리 범위 (%)
+STATUS_BATTERY_FIXED = int(os.getenv("STATUS_BATTERY_FIXED", "89"))  # real 모드일 때 배터리
 CHROMIUM_EXECUTABLE = os.getenv("CHROMIUM_EXECUTABLE", "").strip() or None  # 로컬 테스트용(선택)
 
 KAKAO_AUTH_HOST = "https://kauth.kakao.com"
@@ -511,6 +517,24 @@ def _load_font(size: int) -> ImageFont.ImageFont:
         return ImageFont.load_default(size=size)
 
 
+def status_bar_values(now: datetime) -> tuple[str, int]:
+    """캡처에 찍을 (시각, 배터리%). 기본은 캡처마다 랜덤."""
+    if STATUS_TIME_MODE != "random":
+        return now.strftime("%H:%M"), STATUS_BATTERY_FIXED
+    rng = random.SystemRandom()
+    try:
+        t0, t1 = (hhmm_to_min(x.strip()) for x in STATUS_TIME_RANGE.split("-"))
+    except ValueError:
+        t0, t1 = 0, 24 * 60 - 1
+    span = (t1 - t0) % (24 * 60)  # 22:00-02:00 처럼 자정을 넘는 범위도 허용
+    m = (t0 + rng.randint(0, span)) % (24 * 60)
+    try:
+        b0, b1 = sorted(max(1, min(100, int(x))) for x in STATUS_BATTERY_RANGE.split("-"))
+    except ValueError:
+        b0, b1 = 20, 100
+    return f"{m // 60:02d}:{m % 60:02d}", rng.randint(b0, b1)
+
+
 def render_status_bar(width: int, hhmm: str, battery: int = 89) -> Image.Image:
     """아이폰 다크모드 상태바 (2x 기준 width × 104px). 4배 슈퍼샘플링 후 축소해 안티에일리어싱."""
     ss = 4
@@ -535,8 +559,10 @@ def render_status_bar(width: int, hhmm: str, battery: int = 89) -> Image.Image:
     bx0 = bx1 - body_w
     by0, by1 = cy - body_h / 2, cy + body_h / 2
     radius = 3.6 * s
+    battery = max(1, min(battery, 100))
     dr.rounded_rectangle((bx0, by0, bx1, by1), radius=radius, fill=(88, 88, 90))
-    fill_x = bx0 + body_w * max(0, min(battery, 100)) / 100
+    fill_x = bx0 + body_w * battery / 100
+    fill_color = (255, 59, 48) if battery <= 20 else white  # iOS: 20% 이하 빨간색
     # 채워진 부분만 흰색 (둥근 모서리 유지 위해 마스크 사용)
     mask = Image.new("L", (W, H), 0)
     ImageDraw.Draw(mask).rounded_rectangle((bx0, by0, bx1, by1), radius=radius, fill=255)
@@ -544,12 +570,18 @@ def render_status_bar(width: int, hhmm: str, battery: int = 89) -> Image.Image:
     ImageDraw.Draw(clip).rectangle((bx0, by0, fill_x, by1), fill=255)
     from PIL import ImageChops
 
-    img.paste(white, (0, 0, W, H), ImageChops.multiply(mask, clip))
+    fill_mask = ImageChops.multiply(mask, clip)
+    img.paste(fill_color, (0, 0, W, H), fill_mask)
     dr = ImageDraw.Draw(img)
     dr.rounded_rectangle((bx1 + 1.0 * s, cy - cap_h / 2, bx1 + 1.0 * s + cap_w, cy + cap_h / 2),
                          radius=0.8 * s, fill=(88, 88, 90))
     f_batt = _load_font(int(11.5 * s))
-    dr.text(((bx0 + bx1) / 2, cy + 0.2 * s), str(battery), font=f_batt, fill=STATUS_BAR_BG, anchor="mm")
+    # 숫자: 채워진 부분 위는 어둡게(뚫린 느낌), 빈 부분 위는 흰색
+    txt = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(txt).text(((bx0 + bx1) / 2, cy + 0.2 * s), str(battery), font=f_batt, fill=255, anchor="mm")
+    img.paste(STATUS_BAR_BG, (0, 0, W, H), ImageChops.multiply(txt, fill_mask))
+    img.paste(white, (0, 0, W, H), ImageChops.multiply(txt, ImageChops.invert(fill_mask)))
+    dr = ImageDraw.Draw(img)
 
     # LTE
     f_lte = _load_font(int(15 * s))
@@ -570,18 +602,20 @@ def render_status_bar(width: int, hhmm: str, battery: int = 89) -> Image.Image:
     return img.resize((width, STATUS_BAR_HEIGHT_PX), Image.LANCZOS)
 
 
-def compose_with_status_bar(png: bytes, hhmm: str) -> bytes:
+def compose_with_status_bar(png: bytes, hhmm: str, battery: int) -> bytes:
     shot = Image.open(io.BytesIO(png)).convert("RGB")
-    bar = render_status_bar(shot.width, hhmm)
+    bar = render_status_bar(shot.width, hhmm, battery)
     shot.paste(bar, (0, 0))  # 캡처 모드 페이지는 상단 52px(=104px@2x)를 비워 둔다
     out = io.BytesIO()
     shot.save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
-async def build_brief_image(d: str, hhmm: str) -> bytes:
+async def build_brief_image(d: str, now: datetime) -> bytes:
     raw = await capture_planner(d)
-    return await asyncio.to_thread(compose_with_status_bar, raw, hhmm)
+    hhmm, battery = status_bar_values(now)
+    log.info("status bar: %s / battery %d%%", hhmm, battery)
+    return await asyncio.to_thread(compose_with_status_bar, raw, hhmm, battery)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -623,7 +657,7 @@ async def send_brief(d: str, now: datetime) -> dict:
     desc = f"총 {fmt_hm(st['total_minutes'])} | 할 일 {st['todo_done']}/{st['todo_total']} 완료\n{per}"
     link_url = app_url(d, with_key=KAKAO_LINK_INCLUDE_KEY)
 
-    png = await build_brief_image(d, hhmm)
+    png = await build_brief_image(d, now)
     result["image_bytes"] = len(png)
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -815,7 +849,7 @@ async def notify_test(kind: Literal["brief", "nag"] = Body("brief", embed=True),
 async def preview_png(d: str | None = Query(default=None, alias="date")):
     now = now_kst()
     target = validate_date(d) if d else planner_today(now)
-    png = await build_brief_image(target, now.strftime("%H:%M"))
+    png = await build_brief_image(target, now)
     return Response(png, media_type="image/png", headers=_NO_STORE)
 
 

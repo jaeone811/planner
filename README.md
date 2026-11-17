@@ -46,7 +46,9 @@ planner/
   - 매분 호출되므로 `nag_interval_minutes`(기본 2시간) 간격으로만 보냅니다.
 - **B. 완성본 브리핑**: 오늘 플래너가 있고 지금 시각이 `notify_times`에 해당하면 아래 순서로 보냅니다.
   1. Playwright로 `390×790 @2x`를 캡처합니다.
-  2. Pillow로 iPhone 상태바(현재 시각, 안테나, LTE, 배터리 89)를 합성합니다.
+  2. Pillow로 iPhone 상태바(시각, 안테나, LTE, 배터리)를 합성합니다.
+     - 시각과 배터리는 기본적으로 캡처할 때마다 랜덤입니다. 범위는 `STATUS_TIME_RANGE`, `STATUS_BATTERY_RANGE`로 정합니다.
+     - `STATUS_TIME_MODE=real`이면 실제 발송 시각과 고정 배터리(`STATUS_BATTERY_FIXED`)를 씁니다.
   3. 카카오에 이미지를 업로드하고 Feed 템플릿으로 나에게 보냅니다.
   4. ntfy로 `Click: kakaotalk://`, `Priority: high` 푸시를 보냅니다.
   - 스케줄러가 몇 분 늦게 불러도 놓치지 않도록 `NOTIFY_CATCHUP_MINUTES`(기본 9분) 안의 지연은 허용합니다. 같은 시각은 `state.json`에 기록해 한 번만 보냅니다.
