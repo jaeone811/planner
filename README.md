@@ -69,7 +69,7 @@ planner/
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium          # Docker에서는 불필요
+# 캡처 기능까지 쓰려면: pip install -r requirements-capture.txt && playwright install chromium
 cp .env.example .env                 # APP_SECRET_KEY 등을 채움 (GCS_BUCKET을 비우면 ./data에 저장)
 uvicorn main:app --port 8080
 # 브라우저: http://localhost:8080/?key=<APP_SECRET_KEY>
