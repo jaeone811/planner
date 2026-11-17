@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import io
@@ -53,6 +54,9 @@ INTERNAL_BASE_URL = os.getenv("INTERNAL_BASE_URL", f"http://localhost:{PORT}").r
 
 GCS_BUCKET = os.getenv("GCS_BUCKET", "").strip()
 LOCAL_DATA_DIR = Path(os.getenv("LOCAL_DATA_DIR", str(BASE_DIR / "data")))
+# 메모리 캐시(write-through). Cloud Run max-instances=1 전제 → 매분 크론이 GCS 를 읽지 않아 요금/쿼터 절약.
+# 버킷 파일을 콘솔에서 직접 고칠 거면 false 로 두거나 재배포(인스턴스 재시작) 할 것.
+STORAGE_CACHE = os.getenv("STORAGE_CACHE", "true").lower() == "true"
 
 KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY", "").strip()
 KAKAO_CLIENT_SECRET = os.getenv("KAKAO_CLIENT_SECRET", "").strip()
@@ -107,9 +111,13 @@ log = logging.getLogger("planner")
 # ──────────────────────────────────────────────────────────────────────────────
 # 저장소 (GCS ↔ 로컬 파일 폴백)
 # ──────────────────────────────────────────────────────────────────────────────
+_MISSING = object()
+
+
 class Storage:
     def __init__(self) -> None:
         self.bucket = None
+        self._cache: dict[str, Any] = {}
         if GCS_BUCKET:
             from google.cloud import storage as gcs  # 지연 import (로컬 테스트 가볍게)
 
@@ -150,10 +158,19 @@ class Storage:
         tmp.replace(path)
 
     async def read(self, name: str) -> dict | None:
-        return await asyncio.to_thread(self._read, name)
+        if STORAGE_CACHE:
+            hit = self._cache.get(name, _MISSING)
+            if hit is not _MISSING:
+                return copy.deepcopy(hit)
+        data = await asyncio.to_thread(self._read, name)
+        if STORAGE_CACHE:
+            self._cache[name] = copy.deepcopy(data)  # 없는 파일(None)도 캐시
+        return data
 
     async def write(self, name: str, data: dict) -> None:
         await asyncio.to_thread(self._write, name, data)
+        if STORAGE_CACHE:
+            self._cache[name] = copy.deepcopy(data)
 
 
 storage: Storage  # lifespan 에서 초기화
@@ -697,6 +714,7 @@ async def send_brief(d: str, now: datetime) -> dict:
 
 
 _cron_lock = asyncio.Lock()
+_last_cron_at: str | None = None  # 매분 GCS 쓰기를 피하려고 메모리에만 보관
 
 
 async def run_cron(now: datetime) -> dict:
@@ -704,7 +722,9 @@ async def run_cron(now: datetime) -> dict:
     hhmm = now.strftime("%H:%M")
     settings = await load_settings()
     plan = await load_plan(today)
+    global _last_cron_at
     state = await storage.read(STATE_FILE) or {}
+    before = json.dumps(state, sort_keys=True)
     sent: dict[str, list[str]] = state.setdefault("sent", {})
     actions: list[dict] = []
     is_empty = not plan.get("tasks")
@@ -740,8 +760,9 @@ async def run_cron(now: datetime) -> dict:
     # 오래된 발송 기록 정리
     cutoff = (now.date() - timedelta(days=7)).isoformat()
     state["sent"] = {k: v for k, v in sent.items() if k >= cutoff}
-    state["last_cron_at"] = now.isoformat(timespec="seconds")
-    await storage.write(STATE_FILE, state)
+    _last_cron_at = now.isoformat(timespec="seconds")
+    if json.dumps(state, sort_keys=True) != before:  # 바뀐 게 있을 때만 저장 (평소엔 GCS 쓰기 0회)
+        await storage.write(STATE_FILE, state)
     for a in actions:
         a.pop("image_bytes", None)
     return {"now": now.isoformat(timespec="seconds"), "date": today, "time": hhmm,
@@ -814,7 +835,6 @@ async def save_settings(settings: Settings):
 @app.get("/api/status", dependencies=[Depends(require_key)])
 async def status():
     now = now_kst()
-    state = await storage.read(STATE_FILE) or {}
     return {
         "now": now.isoformat(timespec="seconds"),
         "today": planner_today(now),
@@ -823,7 +843,7 @@ async def status():
         "kakao": {"configured": bool(KAKAO_REST_API_KEY), **(await kakao_connected())},
         "ntfy": {"configured": bool(NTFY_TOPIC), "server": NTFY_SERVER},
         "nag_window": [NAG_START, NAG_END],
-        "last_cron_at": state.get("last_cron_at"),
+        "last_cron_at": _last_cron_at,
     }
 
 

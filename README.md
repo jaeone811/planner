@@ -106,7 +106,7 @@ docker run --rm -p 8080:8080 --env-file .env planner
 ```bash
 # ── 0) 변수 ──────────────────────────────────────────────────────────
 PROJECT_ID="my-gcp-project"
-REGION="asia-northeast3"                  # 서울
+REGION="us-central1"                      # 무료 한도용 미국 리전 (아래 "비용" 참고). 서울은 asia-northeast3
 SERVICE="planner"
 BUCKET="${PROJECT_ID}-planner-data"
 SA_NAME="planner-run"
@@ -157,17 +157,45 @@ gcloud scheduler jobs create http planner-cron \
   --headers="X-App-Key=${APP_SECRET_KEY},Content-Type=application/json" \
   --message-body='{}' --attempt-deadline=180s
 
+# ── 7) 재배포할 때마다 쌓이는 옛 이미지 자동 삭제 (Artifact Registry 무료 0.5GB 아끼기) ─
+cat > ar-cleanup.json <<'JSON'
+[
+  {"name": "keep-latest-1", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 1}},
+  {"name": "delete-old", "action": {"type": "Delete"}, "condition": {"tagState": "ANY", "olderThan": "1d"}}
+]
+JSON
+gcloud artifacts repositories set-cleanup-policies cloud-run-source-deploy \
+  --location="$REGION" --policy=ar-cleanup.json --no-dry-run
+
 # 즉시 한 번 실행해서 확인 / 로그 보기
 gcloud scheduler jobs run planner-cron --location="$REGION"
 gcloud run services logs read "$SERVICE" --region "$REGION" --limit 50
 ```
+
+### 비용 (무료 한도 기준)
+
+- **무료 체험($300, 90일)**: 새 고객에게 한 번만 줍니다.
+- **상시 무료 한도(Free Tier)**: 결제 계정 단위로 매달 다시 채워집니다. 프로젝트를 여러 개 만들어도 한도는 늘지 않고, 그 결제 계정의 프로젝트들이 합산해서 씁니다.
+- **이 앱 하나면 프로젝트 1개로 충분합니다.**
+
+| 항목 | 무료 한도 | 이 앱 사용량 |
+|---|---|---|
+| Cloud Run | 월 200만 요청, 18만 vCPU-초, 36만 GiB-초 (결제 계정 합산) | 크론 매분 = 월 약 4.3만 요청, 대부분 수 ms. 여유 있음 |
+| Cloud Scheduler | 결제 계정당 작업 3개 | 1개 |
+| Cloud Storage | 5GB, Class A 5천·B 5만 회/월. **미국 리전(us-central1·us-east1·us-west1)만 해당** | 메모리 캐시와 "바뀔 때만 저장" 덕분에 월 수백 회 수준 |
+| Artifact Registry | 0.5GB | Playwright 이미지가 이보다 커서 **월 0.1~0.2달러 정도 나올 수 있습니다** (7번 정리 정책으로 최소화) |
+
+- 그래서 기본 리전을 `us-central1`로 잡았습니다. 앱 자체는 한국 시각(Asia/Seoul)으로 동작하고, 화면 저장 지연은 0.1~0.2초 정도 늘어납니다.
+- 서울(`asia-northeast3`)로 하면 버킷이 무료 한도 밖이라 월 몇 센트가 붙습니다.
+- 처음 쓸 땐 콘솔 > 결제 > 예산 및 알림에서 예산 알림을 1,000원 정도로 걸어 두는 걸 추천합니다.
 
 ### 운영 메모
 
 - **스케줄 주기**: 브리핑 시각을 분 단위로 정확히 맞추려고 `* * * * *`(매분)으로 둡니다.
   - 요청 대부분은 수 ms 안에 끝나고, Cloud Scheduler 작업 1개는 무료 할당량(계정당 3개) 안에 들어갑니다.
   - 비용을 더 줄이려면 `*/5 * * * *`로 바꾸고 알림 시각을 5분 단위로 설정하세요. `NOTIFY_CATCHUP_MINUTES` 덕분에 지연돼도 놓치지 않습니다.
-- **메모리**: Chromium 캡처에 1GB 이상이 필요해서 `2Gi`로 잡았습니다. `--max-instances 1`이면 발송 기록(`state.json`) 경합이 생기지 않습니다.
+- **메모리**: Chromium 캡처에 1GB 이상이 필요해서 `2Gi`로 잡았습니다.
+- **`--max-instances 1` 필수**: 발송 기록(`state.json`) 경합을 막고, 메모리 캐시(`STORAGE_CACHE`)의 전제 조건이기도 합니다. 버킷 파일을 콘솔에서 직접 고쳤다면 재배포하거나 `STORAGE_CACHE=false`로 두세요.
 - **보안**:
   - 웹앱, API, 크론 모두 `APP_SECRET_KEY`로 보호됩니다. 페이지는 `Referrer-Policy: no-referrer`와 `noindex`를 적용합니다.
   - 카톡 버튼 링크에는 바로 열 수 있도록 `?key=`가 들어갑니다. 원하지 않으면 `KAKAO_LINK_INCLUDE_KEY=false`로 바꿉니다.
