@@ -127,6 +127,13 @@ gcloud iam service-accounts create "$SA_NAME" --display-name="Planner Cloud Run"
 gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
   --member="serviceAccount:${SA}" --role="roles/storage.objectAdmin"
 
+# 소스 배포(--source)의 빌드 계정(Compute Engine 기본 SA)에 빌드 권한 부여
+# (최근 프로젝트는 기본 권한이 없어서 "Build failed; check build logs"가 남. 반영까지 1~2분)
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/run.builder"
+
 # ── 3) 환경변수 파일 (git에 올리지 말 것: .gitignore에 env.yaml 포함) ─
 cat > env.yaml <<EOF
 APP_SECRET_KEY: "${APP_SECRET_KEY}"
