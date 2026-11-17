@@ -90,6 +90,8 @@ STATUS_BATTERY_RANGE = os.getenv("STATUS_BATTERY_RANGE", "20-100")  # 랜덤 배
 STATUS_BATTERY_FIXED = int(os.getenv("STATUS_BATTERY_FIXED", "89"))  # real 모드일 때 배터리
 # 카톡 피드는 세로로 긴 이미지를 약 3:4 까지만 보여주고 잘라냄 → 캡처 전체가 보이도록 이 비율 캔버스에 맞춰 넣음
 # "none" 이면 원본 그대로 업로드
+# 브리핑 형식: text(기본) = 요약 텍스트만 / image = 플래너 캡처 이미지 포함
+BRIEF_MODE = os.getenv("BRIEF_MODE", "text").strip().lower()
 KAKAO_IMAGE_RATIO = os.getenv("KAKAO_IMAGE_RATIO", "3:4").strip().lower()
 CHROMIUM_EXECUTABLE = os.getenv("CHROMIUM_EXECUTABLE", "").strip() or None  # 로컬 테스트용(선택)
 
@@ -698,40 +700,94 @@ async def send_nag(d: str) -> dict:
     return result
 
 
+KAKAO_TEXT_LIMIT = 200  # 카톡 text 템플릿 본문 최대 길이
+
+
+def brief_text(d: str, plan: dict, limit: int = KAKAO_TEXT_LIMIT) -> str:
+    """텍스트 브리핑 본문 (카톡 text 템플릿 200자 제한에 맞춰 자름)"""
+    dt = date.fromisoformat(d)
+    st = plan_stats(plan)
+    lines = [f"📅 {dt.month}/{dt.day} ({WEEKDAYS_KO[dt.weekday()]}) 플래너 브리핑",
+             f"⏱ 총 {fmt_hm(st['total_minutes'])}"]
+    per = [(n, m) for n, m in st["per_task"] if m > 0]
+    if per:
+        lines += [f"• {n} {fmt_hms(m)[:-3]}" for n, m in per]
+    else:
+        lines.append("• 시간 계획 없음")
+    if st["todo_total"]:
+        lines.append(f"✅ 할 일 {st['todo_done']}/{st['todo_total']} 완료")
+    pending = [td["text"] for t in plan.get("tasks", []) for td in t.get("todos", []) if not td.get("done")]
+
+    text = "\n".join(lines)
+    if len(text) > limit:  # 카테고리가 너무 많으면 뒤에서부터 생략
+        head, cats, tail = lines[:2], lines[2:-1] if st["todo_total"] else lines[2:], lines[-1:] if st["todo_total"] else []
+        while cats and len("\n".join(head + cats + ["• …"] + tail)) > limit:
+            cats.pop()
+        text = "\n".join(head + cats + ["• …"] + tail)
+        return text[:limit]
+    if pending:
+        prefix = "📝 남은 일: "
+        shown: list[str] = []
+        for i, name in enumerate(pending[:6]):  # 최대 6개까지만 나열
+            rest = len(pending) - i - 1
+            cand = prefix + ", ".join(shown + [name]) + (f" 외 {rest}개" if rest else "")
+            if len(text) + 1 + len(cand) > limit:
+                break
+            shown.append(name)
+        if shown:
+            rest = len(pending) - len(shown)
+            text += "\n" + prefix + ", ".join(shown) + (f" 외 {rest}개" if rest else "")
+        elif len(text) + 1 + len(f"📝 남은 일 {len(pending)}개") <= limit:
+            text += f"\n📝 남은 일 {len(pending)}개"
+    return text
+
+
 async def send_brief(d: str, now: datetime) -> dict:
-    """조건 B: 완성본 캡처 → 카카오 이미지 업로드 → 나에게 보내기(Feed) → ntfy"""
-    result: dict[str, Any] = {"type": "brief", "date": d}
+    """조건 B: 브리핑 발송.
+    BRIEF_MODE=text(기본): 요약 텍스트를 나에게 보내기(text 템플릿)
+    BRIEF_MODE=image: 캡처 → 카카오 이미지 업로드 → 나에게 보내기(feed 템플릿)
+    이후 ntfy 푸시"""
+    result: dict[str, Any] = {"type": "brief", "date": d, "mode": BRIEF_MODE}
     hhmm = now.strftime("%H:%M")
     plan = await load_plan(d)
     st = plan_stats(plan)
-    per = " · ".join(f"{n} {fmt_hms(m)[:-3]}" for n, m in st["per_task"] if m > 0) or "시간 계획 없음"
-    desc = f"총 {fmt_hm(st['total_minutes'])} | 할 일 {st['todo_done']}/{st['todo_total']} 완료\n{per}"
     link_url = app_url(d, with_key=KAKAO_LINK_INCLUDE_KEY)
+    link = {"web_url": link_url, "mobile_web_url": link_url}
 
-    png = await build_brief_image(d, now)
-    result["image_bytes"] = len(png)
+    if BRIEF_MODE == "image":
+        per = " · ".join(f"{n} {fmt_hms(m)[:-3]}" for n, m in st["per_task"] if m > 0) or "시간 계획 없음"
+        desc = f"총 {fmt_hm(st['total_minutes'])} | 할 일 {st['todo_done']}/{st['todo_total']} 완료\n{per}"
+        png = await build_brief_image(d, now)
+        result["image_bytes"] = len(png)
+    text = brief_text(d, plan)
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            kakao_png = await asyncio.to_thread(fit_to_ratio, png)
-            kw, kh = Image.open(io.BytesIO(kakao_png)).size
-            info = await kakao_upload_image(client, kakao_png)
-            await kakao_send_memo(client, {
-                "object_type": "feed",
-                "content": {
-                    "title": f"📅 {date_label(d)} 플래너",
-                    "description": desc[:200],
-                    "image_url": info["url"],
-                    "image_width": int(info.get("width") or kw),
-                    "image_height": int(info.get("height") or kh),
-                    "link": {"web_url": link_url, "mobile_web_url": link_url},
-                },
-                "buttons": [
-                    {"title": "플래너 열기", "link": {"web_url": link_url, "mobile_web_url": link_url}},
-                ],
-            })
+            if BRIEF_MODE == "image":
+                kakao_png = await asyncio.to_thread(fit_to_ratio, png)
+                kw, kh = Image.open(io.BytesIO(kakao_png)).size
+                info = await kakao_upload_image(client, kakao_png)
+                await kakao_send_memo(client, {
+                    "object_type": "feed",
+                    "content": {
+                        "title": f"📅 {date_label(d)} 플래너",
+                        "description": desc[:200],
+                        "image_url": info["url"],
+                        "image_width": int(info.get("width") or kw),
+                        "image_height": int(info.get("height") or kh),
+                        "link": link,
+                    },
+                    "buttons": [{"title": "플래너 열기", "link": link}],
+                })
+                result["image_url"] = info["url"]
+            else:
+                await kakao_send_memo(client, {
+                    "object_type": "text",
+                    "text": text,
+                    "link": link,
+                    "button_title": "플래너 열기",
+                })
             result["kakao"] = "ok"
-            result["image_url"] = info["url"]
         except Exception as e:  # noqa: BLE001
             log.exception("kakao brief failed")
             result["kakao"] = f"error: {e}"
@@ -740,8 +796,7 @@ async def send_brief(d: str, now: datetime) -> dict:
         result["ntfy"] = await ntfy_push(
             client,
             f"📅 {hhmm} 플래너 브리핑" if ok else "⚠️ 플래너 카톡 발송 실패",
-            (f"총 {fmt_hm(st['total_minutes'])} · 할 일 {st['todo_done']}/{st['todo_total']}\n카카오톡에서 확인하세요."
-             if ok else str(result["kakao"])[:300]),
+            "\n".join(text.split("\n")[1:]) if ok else str(result["kakao"])[:300],
             click="kakaotalk://",
             priority="high",
             tags="calendar" if ok else "warning",
@@ -898,6 +953,7 @@ async def status():
         "kakao": {"configured": bool(KAKAO_REST_API_KEY), **(await kakao_connected())},
         "ntfy": {"configured": bool(NTFY_TOPIC), "server": NTFY_SERVER},
         "nag_window": [NAG_START, NAG_END],
+        "brief_mode": BRIEF_MODE,
         "last_cron_at": _last_cron_at,
     }
 
