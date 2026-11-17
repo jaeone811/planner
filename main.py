@@ -67,7 +67,8 @@ KAKAO_LINK_INCLUDE_KEY = os.getenv("KAKAO_LINK_INCLUDE_KEY", "true").lower() == 
 
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
-NTFY_TOKEN = os.getenv("NTFY_TOKEN", "").strip()  # 보호된 토픽/셀프호스팅용 (선택)
+NTFY_TOKEN = os.getenv("NTFY_TOKEN", "").strip()
+NTFY_TOPIC_VALID = bool(re.fullmatch(r"[-_A-Za-z0-9]{1,64}", NTFY_TOPIC))  # ntfy 토픽 규칙  # 보호된 토픽/셀프호스팅용 (선택)
 
 TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Seoul"))
 NAG_START = os.getenv("NAG_START", "08:00")
@@ -497,6 +498,9 @@ async def ntfy_push(client: httpx.AsyncClient, title: str, message: str, *, clic
                     priority: str = "high", tags: str = "calendar") -> bool:
     if not NTFY_TOPIC:
         log.info("NTFY_TOPIC not set — skip push")
+        return False
+    if not NTFY_TOPIC_VALID:
+        log.warning("NTFY_TOPIC 형식 오류 (영문·숫자·-·_ 만, 64자 이하): %r", NTFY_TOPIC)
         return False
     headers = {
         "Title": rfc2047(title),
@@ -958,7 +962,7 @@ async def status():
         "day_start_hour": DAY_START_HOUR,
         "storage": storage.mode,
         "kakao": {"configured": bool(KAKAO_REST_API_KEY), **(await kakao_connected())},
-        "ntfy": {"configured": bool(NTFY_TOPIC), "server": NTFY_SERVER},
+        "ntfy": {"configured": bool(NTFY_TOPIC), "valid": NTFY_TOPIC_VALID, "server": NTFY_SERVER},
         "nag_window": [NAG_START, NAG_END],
         "brief_mode": BRIEF_MODE,
         "capture_available": CAPTURE_AVAILABLE,

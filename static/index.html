@@ -944,7 +944,8 @@ select.field { appearance: none; -webkit-appearance: none; }
     line("카카오톡", s.kakao.connected, s.kakao.connected
       ? `연결됨${s.kakao.refresh_token_expires_at ? " (갱신토큰 만료 " + s.kakao.refresh_token_expires_at.slice(0, 10) + ")" : ""}`
       : (s.kakao.configured ? "미연결 — '카카오 연결'을 누르세요" : "REST API 키 미설정"));
-    line("푸시(ntfy)", s.ntfy.configured, s.ntfy.configured ? "설정됨" : "NTFY_TOPIC 미설정");
+    line("푸시(ntfy)", s.ntfy.configured && s.ntfy.valid, !s.ntfy.configured ? "NTFY_TOPIC 미설정"
+      : (s.ntfy.valid ? "설정됨" : "토픽 이름 오류 (영문·숫자·-·_ 만 가능)"));
     line("저장소", true, s.storage === "gcs" ? "Google Cloud Storage" : "로컬 파일");
     line("마지막 크론", !!s.last_cron_at, s.last_cron_at ? s.last_cron_at.replace("T", " ").slice(0, 16) : "아직 없음");
     $("#previewImg").hidden = !s.capture_available;
@@ -976,7 +977,7 @@ select.field { appearance: none; -webkit-appearance: none; }
     btn.textContent = "보내는 중…";
     try {
       const r = await api("/api/notify/test", { method: "POST", body: JSON.stringify({ kind, date: S.date }) });
-      toast(r.kakao === "ok" ? "카톡 발송 완료!" : "카톡: " + r.kakao, 3500);
+      toast((r.kakao === "ok" ? "카톡 ✓" : "카톡 ✗ " + r.kakao) + " · " + (r.ntfy ? "푸시 ✓" : "푸시 ✗"), 4000);
     } catch (err) { toast("실패: " + err.message, 3500); }
     finally { btn.disabled = false; btn.textContent = label; }
   }
