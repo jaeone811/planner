@@ -88,6 +88,9 @@ STATUS_TIME_MODE = os.getenv("STATUS_TIME_MODE", "random").lower()
 STATUS_TIME_RANGE = os.getenv("STATUS_TIME_RANGE", "00:00-23:59")  # 랜덤 시각 범위 (HH:MM-HH:MM)
 STATUS_BATTERY_RANGE = os.getenv("STATUS_BATTERY_RANGE", "20-100")  # 랜덤 배터리 범위 (%)
 STATUS_BATTERY_FIXED = int(os.getenv("STATUS_BATTERY_FIXED", "89"))  # real 모드일 때 배터리
+# 카톡 피드는 세로로 긴 이미지를 약 3:4 까지만 보여주고 잘라냄 → 캡처 전체가 보이도록 이 비율 캔버스에 맞춰 넣음
+# "none" 이면 원본 그대로 업로드
+KAKAO_IMAGE_RATIO = os.getenv("KAKAO_IMAGE_RATIO", "3:4").strip().lower()
 CHROMIUM_EXECUTABLE = os.getenv("CHROMIUM_EXECUTABLE", "").strip() or None  # 로컬 테스트용(선택)
 
 KAKAO_AUTH_HOST = "https://kauth.kakao.com"
@@ -619,6 +622,24 @@ def render_status_bar(width: int, hhmm: str, battery: int = 89) -> Image.Image:
     return img.resize((width, STATUS_BAR_HEIGHT_PX), Image.LANCZOS)
 
 
+def fit_to_ratio(png: bytes, ratio: str = KAKAO_IMAGE_RATIO) -> bytes:
+    """이미지를 잘리지 않게 rw:rh 비율 캔버스(배경 #121212) 가운데에 배치"""
+    if ratio in ("", "none", "off"):
+        return png
+    rw, rh = (int(x) for x in ratio.split(":"))
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    w, h = img.size
+    if w * rh < h * rw:  # 원본이 더 세로로 김 → 좌우 여백
+        cw, ch = -(-h * rw // rh), h
+    else:  # 더 가로로 김 → 상하 여백
+        cw, ch = w, -(-w * rh // rw)
+    canvas = Image.new("RGB", (cw, ch), STATUS_BAR_BG)
+    canvas.paste(img, ((cw - w) // 2, (ch - h) // 2))
+    out = io.BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def compose_with_status_bar(png: bytes, hhmm: str, battery: int) -> bytes:
     shot = Image.open(io.BytesIO(png)).convert("RGB")
     bar = render_status_bar(shot.width, hhmm, battery)
@@ -679,15 +700,17 @@ async def send_brief(d: str, now: datetime) -> dict:
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            info = await kakao_upload_image(client, png)
+            kakao_png = await asyncio.to_thread(fit_to_ratio, png)
+            kw, kh = Image.open(io.BytesIO(kakao_png)).size
+            info = await kakao_upload_image(client, kakao_png)
             await kakao_send_memo(client, {
                 "object_type": "feed",
                 "content": {
                     "title": f"📅 {date_label(d)} 플래너",
                     "description": desc[:200],
                     "image_url": info["url"],
-                    "image_width": int(info.get("width") or CAPTURE_WIDTH * CAPTURE_SCALE),
-                    "image_height": int(info.get("height") or CAPTURE_HEIGHT * CAPTURE_SCALE),
+                    "image_width": int(info.get("width") or kw),
+                    "image_height": int(info.get("height") or kh),
                     "link": {"web_url": link_url, "mobile_web_url": link_url},
                 },
                 "buttons": [
